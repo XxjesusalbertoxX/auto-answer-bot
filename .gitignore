@@ -1,0 +1,16 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+venv/
+debug/
+*.png
+
+# Documentacion y archivos de desarrollo (no se publican)
+documentacion.md
+contexto_automatizacion_encuestas.md
+preguntas_respuestas.md
+respuestas_bot.md
+dump_encuestas.json
+command.txt
