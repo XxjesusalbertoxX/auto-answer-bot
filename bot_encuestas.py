@@ -666,19 +666,23 @@ def _dump_registrar(tipo: str, texto: str, opciones: list, elegida: dict | None)
 
 
 def guardar_dump(ruta: str = "dump_encuestas.json") -> None:
-    """Escribe el volcado (deduplicado) en un JSON."""
+    """Escribe el volcado COMPLETO (sin deduplicar) en un JSON.
+
+    Incluye cada instancia de pregunta (aunque el texto se repita en varias
+    secciones) y agrega un indice consecutivo por encuesta en el campo 'orden'.
+    """
     import json
-    vistos = set()
     salida = []
+    contador = {}
     for r in DUMP_REGISTROS:
-        clave = (r["encuesta"], r["texto"], r["tipo"])
-        if clave in vistos:
-            continue
-        vistos.add(clave)
-        salida.append(r)
+        enc = r.get("encuesta", "")
+        contador[enc] = contador.get(enc, 0) + 1
+        reg = dict(r)
+        reg["orden"] = contador[enc]
+        salida.append(reg)
     with open(ruta, "w", encoding="utf-8") as f:
         json.dump(salida, f, ensure_ascii=False, indent=2)
-    log(f"  Volcado guardado en {ruta} ({len(salida)} preguntas)")
+    log(f"  Volcado guardado en {ruta} ({len(salida)} preguntas, sin deduplicar)")
 
 
 def responder_preguntas_visibles(page) -> int:
@@ -832,6 +836,7 @@ def procesar_secciones_js(page, max_secciones=50) -> dict:
             let secciones = 0;
             let maximo = {max_secciones};
             const RESPUESTA = '{RESPUESTA_ABIERTA}';
+            const DUMP_MODE = {str(DUMP).lower()};
             const HUMANO = {str(MODO_HUMANO).lower()};
             const VEL = {VELOCIDAD};
             const R = {{
@@ -857,6 +862,31 @@ def procesar_secciones_js(page, max_secciones=50) -> dict:
                 return neg.some(k => t.includes(k));
             }}
 
+            function textoPregunta(p) {{
+                const el = p.querySelector('.Pregunta');
+                return el ? el.innerText.trim() : '';
+            }}
+
+            function etiquetaRadio(r) {{
+                let t = r.value || '';
+                if (r.id) {{
+                    const l = document.querySelector('label[for="' + r.id + '"]');
+                    if (l) t = l.innerText.trim();
+                }}
+                return t;
+            }}
+
+            function registrar(tipo, p, opciones, elegida) {{
+                if (!DUMP_MODE) return;
+                if (!window.__dumpReg) window.__dumpReg = [];
+                window.__dumpReg.push({{
+                    tipo: tipo,
+                    texto: textoPregunta(p),
+                    opciones: opciones,
+                    elegida: elegida
+                }});
+            }}
+
             function responderPregunta(p) {{
                 if (p.offsetParent === null) return false;
 
@@ -873,6 +903,7 @@ def procesar_secciones_js(page, max_secciones=50) -> dict:
                     if (!cand.length) return false;
                     const mejorRadio = cand[0];
                     if (mejorRadio) {{
+                        registrar('radio', p, lista.map(etiquetaRadio), etiquetaRadio(mejorRadio));
                         mejorRadio.click();
                         mejorRadio.dispatchEvent(new Event('change', {{bubbles: true}}));
                         return true;
@@ -900,6 +931,7 @@ def procesar_secciones_js(page, max_secciones=50) -> dict:
                         }}
                         if (!mejor) mejor = opts[opts.length - 1];
                         if (select.value !== mejor.value || !select.value) {{
+                            registrar('select', p, opts.map(o => o.text.trim()), mejor.text.trim());
                             select.value = mejor.value;
                             select.dispatchEvent(new Event('change', {{bubbles: true}}));
                             return true;
@@ -910,6 +942,7 @@ def procesar_secciones_js(page, max_secciones=50) -> dict:
 
                 const inpText = p.querySelector('input[type="text"].form-control');
                 if (inpText && !inpText.value.trim()) {{
+                    registrar('texto', p, [], RESPUESTA);
                     inpText.value = RESPUESTA;
                     inpText.dispatchEvent(new Event('input', {{bubbles: true}}));
                     inpText.dispatchEvent(new Event('change', {{bubbles: true}}));
@@ -918,6 +951,7 @@ def procesar_secciones_js(page, max_secciones=50) -> dict:
 
                 const ta = p.querySelector('textarea');
                 if (ta && !ta.value.trim()) {{
+                    registrar('texto', p, [], RESPUESTA);
                     ta.value = RESPUESTA;
                     ta.dispatchEvent(new Event('input', {{bubbles: true}}));
                     ta.dispatchEvent(new Event('change', {{bubbles: true}}));
@@ -928,6 +962,15 @@ def procesar_secciones_js(page, max_secciones=50) -> dict:
                 if (checks.length > 0) {{
                     for (const c of checks) {{
                         if (!c.checked && !c.disabled) {{
+                            const cbs = Array.from(checks).map(function (x) {{
+                                let t = x.value || '';
+                                if (x.id) {{
+                                    const l = document.querySelector('label[for="' + x.id + '"]');
+                                    if (l) t = l.innerText.trim();
+                                }}
+                                return t;
+                            }});
+                            registrar('checkbox', p, cbs, '');
                             c.click();
                             c.dispatchEvent(new Event('change', {{bubbles: true}}));
                             return true;
@@ -988,7 +1031,26 @@ def procesar_secciones_js(page, max_secciones=50) -> dict:
         }});
     }}
     """
-    return page.evaluate(codigo)
+    res = page.evaluate(codigo)
+    if DUMP:
+        try:
+            regs = page.evaluate("() => window.__dumpReg || []")
+        except Exception:
+            regs = []
+        for reg in regs:
+            DUMP_REGISTROS.append({
+                "encuesta": ENCUESTA_ACTUAL.get("nombre", ""),
+                "codigo": ENCUESTA_ACTUAL.get("codigo", ""),
+                "tipo": reg.get("tipo", ""),
+                "texto": (reg.get("texto") or "").strip(),
+                "opciones": reg.get("opciones", []),
+                "elegida": reg.get("elegida", ""),
+            })
+        try:
+            page.evaluate("() => { window.__dumpReg = []; }")
+        except Exception:
+            pass
+    return res
 
 
 def avanzar_secciones_python(page, max_secciones=60) -> int:
